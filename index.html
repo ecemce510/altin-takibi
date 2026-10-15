@@ -385,13 +385,13 @@ function syncStart(){
   clearInterval(syncPullTimer);
   if(!syncEnabled()) return;
   syncPull();
-  syncPullTimer = setInterval(()=>{ syncPull(); }, 20000);
+  syncPullTimer = setInterval(()=>{ syncPull(); }, 10000);
 }
 
 document.getElementById("btnSync").addEventListener("click", ()=>{
   document.getElementById("syncToken").value = syncCfg.token||"";
   document.getElementById("syncGistId").value = syncCfg.gistId||"";
-  syncStatusText(syncEnabled()? "Bağlı ✓ (her 20 sn'de bir otomatik çekilir)" : "Bağlı değil.");
+  syncStatusText(syncEnabled()? "Bağlı ✓ (her 10 sn'de bir otomatik çekilir)" : "Bağlı değil.");
   document.getElementById("syncModal").classList.add("on");
 });
 document.getElementById("syncClose").addEventListener("click", ()=> document.getElementById("syncModal").classList.remove("on"));
@@ -404,7 +404,7 @@ document.getElementById("syncSave").addEventListener("click", async ()=>{
   syncStatusText("Bağlanıyor…");
   const ok = await syncPull();
   if(!ok){ await syncPush(true); }
-  syncStatusText(syncEnabled()? "Bağlı ✓ (her 20 sn'de bir otomatik çekilir)" : "Bağlı değil.");
+  syncStatusText(syncEnabled()? "Bağlı ✓ (her 10 sn'de bir otomatik çekilir)" : "Bağlı değil.");
   syncStart();
 });
 /* ---------- bulut senkron sonu ---------- */
