@@ -37,6 +37,7 @@ a{color:var(--blue)}
 .top .sub{color:var(--muted);font-size:12.5px;margin-top:3px}
 .btn{background:rgba(255,255,255,.05);color:var(--txt);border:1px solid var(--line2);border-radius:12px;padding:9px 14px;cursor:pointer;font-size:13px;font-weight:500;transition:transform .15s ease,border-color .15s ease,background .15s ease,box-shadow .15s ease;backdrop-filter:blur(6px)}
 .btn:hover{transform:translateY(-1px);border-color:var(--gold);background:rgba(232,193,90,.08)}
+.btn.on{border-color:#4caf7d;color:#9ff0c4;background:rgba(76,175,125,.12)}
 .btn:active{transform:translateY(0)}
 .btn.gold{background:linear-gradient(180deg,var(--gold2),var(--gold));color:#241c00;border-color:transparent;font-weight:700;box-shadow:0 8px 22px -8px rgba(232,193,90,.65)}
 .btn.gold:hover{box-shadow:0 10px 28px -8px rgba(232,193,90,.85)}
@@ -132,6 +133,7 @@ tfoot td{font-weight:700;border-top:1px solid var(--line2);border-bottom:none;co
   <div class="box" style="width:360px">
     <div style="font-size:26px">☁️</div>
     <p style="color:var(--muted);font-size:13px">Bulut senkron (GitHub Gist)</p>
+    <p style="color:var(--muted);font-size:11.5px;margin-top:4px;line-height:1.5">Her cihazda bir kez token girmen yeterli. Token'ı <b>gist</b> izniyle oluştur: <a href="https://github.com/settings/tokens/new?scopes=gist&description=AltinTakip%20Sync" target="_blank" rel="noopener">buraya tıkla</a>. Gist ID hazırdır.</p>
     <div class="field" style="margin-top:8px">
       <label>GitHub Token (gist yetkili)</label>
       <input id="syncToken" type="password" placeholder="ghp_..." autocomplete="off">
@@ -275,12 +277,21 @@ function defaultState(){
       { id:uid(), date:"2026-09-28", gram:1, ceyrek:1, cost:17036, marketGram:null },
       { id:uid(), date:"2026-10-13", gram:1, ceyrek:1, cost:17310, marketGram:null }
     ],
-    pinHash:null
+    pinHash:null,
+    tombstones:[]
   };
 }
 
 let state = load();
 
+// 18.08.2026 ve 13.10.2026 maliyetleri bir sürümde yanlışlıkla ters kaydedilmişti; düzelt.
+function repairCost(date, cost){
+  const c = Number(cost);
+  if(date==="2026-08-18" && c===17310) return 18520;
+  if(date==="2026-10-13" && c===18520) return 17310;
+  return cost;
+}
+function repairPurchase(p){ if(p && p.date){ p.cost = repairCost(p.date, p.cost); } return p; }
 function load(){
   try{
     const raw = localStorage.getItem(LS);
@@ -289,7 +300,9 @@ function load(){
     const d = defaultState();
     s.prices = Object.assign(d.prices, s.prices||{});
     s.purchases = Array.isArray(s.purchases) ? s.purchases : d.purchases;
+    s.tombstones = Array.isArray(s.tombstones) ? s.tombstones : [];
     s = migrate(s);
+    s.purchases = (s.purchases||[]).map(repairPurchase);
     return s;
   }catch(e){ return defaultState(); }
 }
@@ -305,9 +318,12 @@ function migrate(s){
   }
   return s;
 }
-function save(){
+function persistLocal(){
   try{ localStorage.setItem(LS, JSON.stringify(state)); }
   catch(e){ console.warn("Kaydedilemedi", e); }
+}
+function save(){
+  persistLocal();
   syncSchedulePush();
 }
 
@@ -327,12 +343,53 @@ function syncHeaders(){
     "Content-Type": "application/json"
   };
 }
+function syncNormalize(list){
+  return (Array.isArray(list)?list:[]).filter(p=>p && p.id && p.date).map(p=>({
+    id:p.id, date:p.date, gram:p.gram||0, ceyrek:p.ceyrek||0, cost:repairCost(p.date, p.cost||0),
+    marketGram:(p.marketGram==null?null:p.marketGram)
+  }));
+}
+// Aynı alımı farklı cihazlarda farklı id ile temsil edebiliriz (varsayılan kayıtlar).
+// Bu yüzden iş anahtarına göre de tekilleştiriyoruz; tombstone'lar id ile siler.
+function syncKey(p){ return [p.date, p.cost, p.gram, p.ceyrek].join("|"); }
+function syncMerge(localP, localTomb, remoteP, remoteTomb){
+  const tomb = new Set([...(localTomb||[]), ...(remoteTomb||[])]);
+  const map = new Map();
+  syncNormalize(remoteP).forEach(p=>{ if(!tomb.has(p.id)) map.set(syncKey(p), p); });
+  syncNormalize(localP).forEach(p=>{ if(!tomb.has(p.id)) map.set(syncKey(p), p); });
+  const purchases = [...map.values()].sort((a,b)=> a.date===b.date ? (a.id<b.id?-1:a.id>b.id?1:0) : (a.date<b.date?-1:1));
+  const tombstones = [...tomb].sort();
+  return { purchases, tombstones };
+}
+async function syncGetRemote(){
+  const r = await fetch("https://api.github.com/gists/"+syncCfg.gistId, { headers: syncHeaders(), cache:"no-store" });
+  if(!r.ok) return { ok:false, status:r.status };
+  const j = await r.json();
+  const f = j.files && j.files[syncCfg.file];
+  if(!f || !f.content) return { ok:true, data:null };
+  try{ return { ok:true, data: JSON.parse(f.content) }; }catch(e){ return { ok:true, data:null }; }
+}
+function syncApplyMerged(merged){
+  const localSig = JSON.stringify({ p:state.purchases, t:state.tombstones });
+  const newSig = JSON.stringify({ p:merged.purchases, t:merged.tombstones });
+  if(localSig===newSig) return false;
+  state.purchases = merged.purchases;
+  state.tombstones = merged.tombstones;
+  persistLocal();
+  paintPriceInputs(); render();
+  return true;
+}
 async function syncPush(force){
   if(!syncEnabled()) return false;
   if(syncing) return false;
   syncing = true;
   try{
-    const payload = { updatedAt: Date.now(), purchases: state.purchases, prices: state.prices, pinHash: state.pinHash };
+    // Önce uzaktakini alıp birleştir; böylece diğer cihazın eklediği kayıtlar ezilmez.
+    const rem = await syncGetRemote();
+    if(rem && rem.ok && rem.data){
+      syncApplyMerged(syncMerge(state.purchases, state.tombstones, rem.data.purchases, rem.data.tombstones));
+    }
+    const payload = { updatedAt: Date.now(), purchases: state.purchases, prices: state.prices, pinHash: state.pinHash, tombstones: state.tombstones };
     const r = await fetch("https://api.github.com/gists/"+syncCfg.gistId, {
       method:"PATCH", headers: syncHeaders(),
       body: JSON.stringify({ files: { [syncCfg.file]: { content: JSON.stringify(payload, null, 2) } } })
@@ -342,6 +399,7 @@ async function syncPush(force){
       return false;
     }
     syncStatusText("Senkron ✓ "+fmtDateTime(Date.now()));
+    syncBadgeUI();
     return true;
   }catch(e){
     syncStatusText("Senkron hatası (çevrimdışı olabilirsiniz).");
@@ -358,31 +416,33 @@ async function syncPull(){
   if(syncing) return false;
   syncing = true;
   try{
-    const r = await fetch("https://api.github.com/gists/"+syncCfg.gistId, { headers: syncHeaders(), cache:"no-store" });
-    if(!r.ok){ if(r.status===404) toast("Gist bulunamadı — ID'yi kontrol edin."); return false; }
-    const j = await r.json();
-    const f = j.files && j.files[syncCfg.file];
-    if(!f || !f.content) return false;
-    const data = JSON.parse(f.content);
-    if(!data || !Array.isArray(data.purchases)) return false;
-    const localSig = JSON.stringify(state.purchases);
-    const remoteSig = JSON.stringify(data.purchases);
-    if(localSig!==remoteSig){
-      state.purchases = data.purchases.map(p=>({ id:p.id||uid(), date:p.date, gram:p.gram||0, ceyrek:p.ceyrek||0, cost:p.cost||0, marketGram:(p.marketGram==null?null:p.marketGram) }));
-      if(data.prices) state.prices = Object.assign(state.prices, data.prices);
-      if(data.pinHash!==undefined) state.pinHash = data.pinHash;
-      save();
-      paintPriceInputs(); render();
-      toast("Buluttan güncellendi ✓");
+    const rem = await syncGetRemote();
+    if(!rem.ok){ if(rem.status===404) toast("Gist bulunamadı — ID'yi kontrol edin."); return false; }
+    const data = rem.data;
+    if(!data || !Array.isArray(data.purchases)) return true;
+    const merged = syncMerge(state.purchases, state.tombstones, data.purchases, data.tombstones);
+    let priceChanged=false;
+    if(data.prices && (data.prices.updatedAt||0) > (state.prices.updatedAt||0)){
+      state.prices = Object.assign({}, state.prices, data.prices); priceChanged=true;
     }
+    const changed = syncApplyMerged(merged);
+    if(priceChanged && !changed){ persistLocal(); paintPriceInputs(); render(); }
+    if(changed){ toast("Buluttan güncellendi ✓"); syncSchedulePush(); }
     syncStatusText("Senkron ✓ "+fmtDateTime(Date.now()));
+    syncBadgeUI();
     return true;
   }catch(e){ return false; }
   finally{ syncing=false; }
 }
 function syncStatusText(t){ const el=document.getElementById("syncStatus"); if(el) el.textContent=t; }
+function syncBadgeUI(){
+  const b=document.getElementById("btnSync"); if(!b || !b.classList) return;
+  if(syncEnabled()){ b.classList.add("on"); if((b.textContent||"").indexOf("Bağlı")<0) b.textContent="☁️ Bağlı"; }
+  else{ b.classList.remove("on"); if((b.textContent||"").indexOf("Bağlı")>=0) b.textContent="☁️ Senkron"; }
+}
 function syncStart(){
   clearInterval(syncPullTimer);
+  syncBadgeUI();
   if(!syncEnabled()) return;
   syncPull();
   syncPullTimer = setInterval(()=>{ syncPull(); }, 10000);
@@ -391,7 +451,7 @@ function syncStart(){
 document.getElementById("btnSync").addEventListener("click", ()=>{
   document.getElementById("syncToken").value = syncCfg.token||"";
   document.getElementById("syncGistId").value = syncCfg.gistId||"";
-  syncStatusText(syncEnabled()? "Bağlı ✓ (her 10 sn'de bir otomatik çekilir)" : "Bağlı değil.");
+  syncStatusText(syncEnabled()? "Bağlı ✓ (her 10 sn'de bir otomatik çekilir)" : "Bağlı değil — token girip Kaydet & Bağlan.");
   document.getElementById("syncModal").classList.add("on");
 });
 document.getElementById("syncClose").addEventListener("click", ()=> document.getElementById("syncModal").classList.remove("on"));
@@ -710,6 +770,7 @@ document.getElementById("tbody").addEventListener("click", e=>{
   if(!id) return;
   if(!confirm("Bu alımı silmek istediğinize emin misiniz?")) return;
   state.purchases = state.purchases.filter(p=>p.id!==id);
+  state.tombstones = Array.from(new Set([...(state.tombstones||[]), id]));
   save(); render();
 });
 
@@ -808,7 +869,7 @@ function applyPrices(gram, ceyrek, source){
   if(typeof gram==="number" && gram>0 && gram!==state.prices.gram){ state.prices.gram=gram; changed=true; }
   if(typeof ceyrek==="number" && ceyrek>0 && ceyrek!==state.prices.ceyrek){ state.prices.ceyrek=ceyrek; changed=true; }
   if(changed || source!==state.prices.source){
-    state.prices.source = source; state.prices.updatedAt = Date.now(); save();
+    state.prices.source = source; state.prices.updatedAt = Date.now(); persistLocal();
     paintPriceInputs(); render();
   }
   setDot(true, "Güncel ("+source+")");
