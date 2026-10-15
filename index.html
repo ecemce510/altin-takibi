@@ -254,8 +254,8 @@ tfoot td{font-weight:700;border-top:1px solid var(--line2);border-bottom:none;co
   </div>
 
   <div class="foot">
-    Veriler yalnızca bu tarayıcının yerel deposunda (localStorage) tutulur, hiçbir yere gönderilmez.
-    Düzenli olarak “Yedekle” ile JSON yedeği almanız önerilir.
+    Veriler cihazınızın yerel deposunda (localStorage) tutulur. “☁️ Senkron” ile GitHub Gist üzerinden
+    diğer cihazlarınızla otomatik paylaşabilirsiniz. Düzenli olarak “Yedekle” ile JSON yedeği almanız önerilir.
   </div>
 </div>
 
@@ -313,7 +313,8 @@ function save(){
 
 /* ---------- bulut senkron (GitHub Gist) ---------- */
 const SYNC_LS = "altinSync.v1";
-let syncCfg = { token:"", gistId:"", enabled:false, file:"purchases.json" };
+const SYNC_DEFAULT_GIST = "d626ccbfd6f2577157a5c03fe794393d";
+let syncCfg = { token:"", gistId:SYNC_DEFAULT_GIST, enabled:false, file:"purchases.json" };
 try{ const raw = localStorage.getItem(SYNC_LS); if(raw) syncCfg = Object.assign(syncCfg, JSON.parse(raw)); }catch(e){}
 function syncSaveCfg(){ try{ localStorage.setItem(SYNC_LS, JSON.stringify(syncCfg)); }catch(e){} }
 let syncPushTimer=null, syncPullTimer=null, syncing=false;
