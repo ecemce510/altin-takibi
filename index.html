@@ -128,6 +128,26 @@ tfoot td{font-weight:700;border-top:1px solid var(--line2);border-bottom:none;co
 
 <div id="toast" class="toast"></div>
 
+<div class="lock" id="syncModal">
+  <div class="box" style="width:360px">
+    <div style="font-size:26px">☁️</div>
+    <p style="color:var(--muted);font-size:13px">Bulut senkron (GitHub Gist)</p>
+    <div class="field" style="margin-top:8px">
+      <label>GitHub Token (gist yetkili)</label>
+      <input id="syncToken" type="password" placeholder="ghp_..." autocomplete="off">
+    </div>
+    <div class="field" style="margin-top:8px">
+      <label>Gist ID</label>
+      <input id="syncGistId" type="text" placeholder="gist id" autocomplete="off">
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn gold" style="flex:1" id="syncSave">Kaydet & Bağlan</button>
+      <button class="btn ghost" style="flex:1" id="syncClose">Kapat</button>
+    </div>
+    <p id="syncStatus" class="muted" style="font-size:12px;margin-top:8px"></p>
+  </div>
+</div>
+
 <div class="lock" id="lock">
   <div class="box">
     <div style="font-size:26px">🔒</div>
@@ -148,6 +168,7 @@ tfoot td{font-weight:700;border-top:1px solid var(--line2);border-bottom:none;co
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn" id="btnShare" title="Kayıtları telefonla paylaş (bağlantı)">🔗 Paylaş</button>
+      <button class="btn" id="btnSync" title="Bulut senkron (GitHub Gist)">☁️ Senkron</button>
       <button class="btn" id="btnLockToggle" title="Şifre belirle / kaldır">🔐 Şifre</button>
       <button class="btn" id="btnExport">⬇️ Yedekle</button>
       <button class="btn" id="btnImport">⬆️ Geri yükle</button>
@@ -287,7 +308,105 @@ function migrate(s){
 function save(){
   try{ localStorage.setItem(LS, JSON.stringify(state)); }
   catch(e){ console.warn("Kaydedilemedi", e); }
+  syncSchedulePush();
 }
+
+/* ---------- bulut senkron (GitHub Gist) ---------- */
+const SYNC_LS = "altinSync.v1";
+let syncCfg = { token:"", gistId:"", enabled:false, file:"purchases.json" };
+try{ const raw = localStorage.getItem(SYNC_LS); if(raw) syncCfg = Object.assign(syncCfg, JSON.parse(raw)); }catch(e){}
+function syncSaveCfg(){ try{ localStorage.setItem(SYNC_LS, JSON.stringify(syncCfg)); }catch(e){} }
+let syncPushTimer=null, syncPullTimer=null, syncing=false;
+function syncEnabled(){ return !!(syncCfg.enabled && syncCfg.token && syncCfg.gistId); }
+
+function syncHeaders(){
+  return {
+    "Authorization": "token "+syncCfg.token,
+    "Accept": "application/vnd.github+json",
+    "Content-Type": "application/json"
+  };
+}
+async function syncPush(force){
+  if(!syncEnabled()) return false;
+  if(syncing) return false;
+  syncing = true;
+  try{
+    const payload = { updatedAt: Date.now(), purchases: state.purchases, prices: state.prices, pinHash: state.pinHash };
+    const r = await fetch("https://api.github.com/gists/"+syncCfg.gistId, {
+      method:"PATCH", headers: syncHeaders(),
+      body: JSON.stringify({ files: { [syncCfg.file]: { content: JSON.stringify(payload, null, 2) } } })
+    });
+    if(!r.ok){
+      if(r.status===401 || r.status===403){ toast("Senkron token reddedildi — ☁️ Senkron'dan yenile."); }
+      return false;
+    }
+    syncStatusText("Senkron ✓ "+fmtDateTime(Date.now()));
+    return true;
+  }catch(e){
+    syncStatusText("Senkron hatası (çevrimdışı olabilirsiniz).");
+    return false;
+  }finally{ syncing=false; }
+}
+function syncSchedulePush(){
+  if(!syncEnabled()) return;
+  clearTimeout(syncPushTimer);
+  syncPushTimer = setTimeout(()=>{ syncPush(); }, 1200);
+}
+async function syncPull(){
+  if(!syncEnabled()) return false;
+  if(syncing) return false;
+  syncing = true;
+  try{
+    const r = await fetch("https://api.github.com/gists/"+syncCfg.gistId, { headers: syncHeaders(), cache:"no-store" });
+    if(!r.ok){ if(r.status===404) toast("Gist bulunamadı — ID'yi kontrol edin."); return false; }
+    const j = await r.json();
+    const f = j.files && j.files[syncCfg.file];
+    if(!f || !f.content) return false;
+    const data = JSON.parse(f.content);
+    if(!data || !Array.isArray(data.purchases)) return false;
+    const localSig = JSON.stringify(state.purchases);
+    const remoteSig = JSON.stringify(data.purchases);
+    if(localSig!==remoteSig){
+      state.purchases = data.purchases.map(p=>({ id:p.id||uid(), date:p.date, gram:p.gram||0, ceyrek:p.ceyrek||0, cost:p.cost||0, marketGram:(p.marketGram==null?null:p.marketGram) }));
+      if(data.prices) state.prices = Object.assign(state.prices, data.prices);
+      if(data.pinHash!==undefined) state.pinHash = data.pinHash;
+      save();
+      paintPriceInputs(); render();
+      toast("Buluttan güncellendi ✓");
+    }
+    syncStatusText("Senkron ✓ "+fmtDateTime(Date.now()));
+    return true;
+  }catch(e){ return false; }
+  finally{ syncing=false; }
+}
+function syncStatusText(t){ const el=document.getElementById("syncStatus"); if(el) el.textContent=t; }
+function syncStart(){
+  clearInterval(syncPullTimer);
+  if(!syncEnabled()) return;
+  syncPull();
+  syncPullTimer = setInterval(()=>{ syncPull(); }, 20000);
+}
+
+document.getElementById("btnSync").addEventListener("click", ()=>{
+  document.getElementById("syncToken").value = syncCfg.token||"";
+  document.getElementById("syncGistId").value = syncCfg.gistId||"";
+  syncStatusText(syncEnabled()? "Bağlı ✓ (her 20 sn'de bir otomatik çekilir)" : "Bağlı değil.");
+  document.getElementById("syncModal").classList.add("on");
+});
+document.getElementById("syncClose").addEventListener("click", ()=> document.getElementById("syncModal").classList.remove("on"));
+document.getElementById("syncSave").addEventListener("click", async ()=>{
+  syncCfg.token = document.getElementById("syncToken").value.trim();
+  syncCfg.gistId = document.getElementById("syncGistId").value.trim();
+  syncCfg.enabled = !!(syncCfg.token && syncCfg.gistId);
+  syncSaveCfg();
+  if(!syncEnabled()){ syncStatusText("Eksik bilgi — bağlantı kapalı."); syncStart(); return; }
+  syncStatusText("Bağlanıyor…");
+  const ok = await syncPull();
+  if(!ok){ await syncPush(true); }
+  syncStatusText(syncEnabled()? "Bağlı ✓ (her 20 sn'de bir otomatik çekilir)" : "Bağlı değil.");
+  syncStart();
+});
+/* ---------- bulut senkron sonu ---------- */
 
 /* ---------- paylaşım bağlantısı (veriyi URL içinde taşır) ---------- */
 function b64encode(str){
@@ -796,6 +915,7 @@ document.getElementById("btnFetch").addEventListener("click", autoFetch);
   applyShareHash();
   lockUI();
   render();
+  syncStart();
   autoFetch();
   // fiyat yedeğini 5 dk'da bir tazele (canlı yayın çalışmıyorsa)
   setInterval(()=>{ if(!haremOpen) fetchTruncgil().catch(()=>{}); }, 5*60*1000);
